@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Reels Grab</string>
+    <string name="accessibility_desc">يعرض زر تحميل عائم فوق إنستجرام وفيسبوك، ويضغط مشاركة ثم نسخ الرابط بدلاً منك. لا يجمع ولا يرسل أي بيانات شخصية.</string>
+</resources>
