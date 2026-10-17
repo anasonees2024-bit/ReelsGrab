@@ -1,11 +1,14 @@
 package com.reelsgrab
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.GestureDescription
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.graphics.Path
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
@@ -33,7 +36,7 @@ class ReelsAccessibilityService : AccessibilityService() {
     )
 
     private val shareLabels = listOf("share", "send post", "send", "مشاركة", "إرسال", "ارسال")
-    private val copyLabels = listOf("copy link", "نسخ الرابط", "نسخ رابط")
+    private val copyLabels = listOf("copy link", "نسخ الرابط", "نسخ رابط", "copy")
 
     private val screenOff = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -154,29 +157,34 @@ class ReelsAccessibilityService : AccessibilityService() {
         button?.alpha = 0.4f
         toast("جاري جلب الرابط…")
 
-        val root = rootInActiveWindow
-        val hasCopy = root?.let { findClickable(it, copyLabels) } != null
-        if (hasCopy) {
+        if (findNode(copyLabels) != null) {
             tryCopy(0)
         } else {
-            val share = root?.let { findClickable(it, shareLabels) }
-            share?.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-            handler.postDelayed({ tryCopy(0) }, 600)
+            val share = findNode(shareLabels)
+            if (share != null) tapNode(share)
+            handler.postDelayed({ tryCopy(0) }, 500)
         }
     }
 
     private fun tryCopy(attempt: Int) {
-        val node = rootInActiveWindow?.let { findClickable(it, copyLabels) }
-        if (node != null) {
-            node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-            launchPicker(700)
+        val node = findNode(copyLabels)
+        if (node != null && tapNode(node)) {
+            launchPicker(600)
             return
         }
-        if (attempt < 4) {
-            handler.postDelayed({ tryCopy(attempt + 1) }, 450)
+        if (attempt < 8) {
+            handler.postDelayed({ tryCopy(attempt + 1) }, 300)
         } else {
-            toast("ما لقيت زر نسخ الرابط، بجرب الرابط المنسوخ")
-            launchPicker(0)
+            busy = false
+            button?.alpha = 0.92f
+            val seen = collectLabels(14)
+            handler.post {
+                Toast.makeText(
+                    this,
+                    "ما لقيت زر نسخ الرابط. الموجود على الشاشة: $seen",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
         }
     }
 
@@ -195,22 +203,74 @@ class ReelsAccessibilityService : AccessibilityService() {
         }, delay)
     }
 
-    private fun findClickable(root: AccessibilityNodeInfo, labels: List<String>): AccessibilityNodeInfo? {
-        val queue = ArrayDeque<AccessibilityNodeInfo>()
-        queue.add(root)
-        while (queue.isNotEmpty()) {
-            val n = queue.removeFirst()
-            val low = ((n.text?.toString() ?: "") + "|" + (n.contentDescription?.toString() ?: "")).lowercase()
-            if (labels.any { low.contains(it) }) {
-                var c: AccessibilityNodeInfo? = n
-                while (c != null && !c.isClickable) c = c.parent
-                if (c != null) return c
+    // ---------- البحث والضغط ----------
+
+    private fun roots(): List<AccessibilityNodeInfo> {
+        val list = ArrayList<AccessibilityNodeInfo>()
+        rootInActiveWindow?.let { list.add(it) }
+        try {
+            for (w in windows) {
+                val r = w.root ?: continue
+                if (r.packageName?.toString() == packageName) continue
+                if (list.none { it == r }) list.add(r)
             }
-            for (i in 0 until n.childCount) {
-                n.getChild(i)?.let { queue.add(it) }
+        } catch (_: Exception) {
+        }
+        return list
+    }
+
+    private fun labelOf(n: AccessibilityNodeInfo): String =
+        ((n.text?.toString() ?: "") + "|" + (n.contentDescription?.toString() ?: "")).lowercase()
+
+    private fun findNode(labels: List<String>): AccessibilityNodeInfo? {
+        for (root in roots()) {
+            val queue = ArrayDeque<AccessibilityNodeInfo>()
+            queue.add(root)
+            while (queue.isNotEmpty()) {
+                val n = queue.removeFirst()
+                val low = labelOf(n)
+                if (low.length > 1 && labels.any { low.contains(it) }) return n
+                for (i in 0 until n.childCount) {
+                    n.getChild(i)?.let { queue.add(it) }
+                }
             }
         }
         return null
+    }
+
+    private fun collectLabels(limit: Int): String {
+        val out = ArrayList<String>()
+        for (root in roots()) {
+            val queue = ArrayDeque<AccessibilityNodeInfo>()
+            queue.add(root)
+            while (queue.isNotEmpty() && out.size < limit) {
+                val n = queue.removeFirst()
+                val t = n.text?.toString() ?: n.contentDescription?.toString()
+                if (!t.isNullOrBlank()) out.add(t.take(20))
+                for (i in 0 until n.childCount) {
+                    n.getChild(i)?.let { queue.add(it) }
+                }
+            }
+        }
+        return if (out.isEmpty()) "لا شيء" else out.joinToString(" | ")
+    }
+
+    // يضغط على العقدة أو أقرب أب قابل للضغط، وإن فشل يضغط بإحداثياتها على الشاشة
+    private fun tapNode(n: AccessibilityNodeInfo): Boolean {
+        var c: AccessibilityNodeInfo? = n
+        while (c != null) {
+            if (c.isClickable && c.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+            c = c.parent
+        }
+        val r = Rect()
+        n.getBoundsInScreen(r)
+        if (r.isEmpty) return false
+        val path = Path()
+        path.moveTo(r.exactCenterX(), r.exactCenterY())
+        val g = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, 60))
+            .build()
+        return dispatchGesture(g, null, null)
     }
 
     private fun toast(msg: String) {
